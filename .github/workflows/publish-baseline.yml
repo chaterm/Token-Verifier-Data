@@ -248,7 +248,9 @@ jobs:
 
           gh release upload "$TAG" \
             "_assets/${CFG_NAME}" "_assets/SHA256SUMS" --clobber
-          gh release edit "$TAG" --body-file _body.md --draft=false
+          # gh release edit 的正文参数是 --notes-file（没有 --body-file）；
+          # --draft=false 把草稿转正发布
+          gh release edit "$TAG" --notes-file _body.md --draft=false
           echo "published: $TAG"
           echo "model=$MODEL" >> "$GITHUB_ENV"
 
