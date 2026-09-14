@@ -261,9 +261,11 @@ jobs:
           MODEL="${model:-${{ inputs.model }}}"
           NOTES='${{ inputs.notes }}'
           ROW="| ${MODEL} | ${{ steps.meta.outputs.suite_version }} | ${{ steps.meta.outputs.tool_version }} | ${NOTES:-—} | [\`${TAG}\`](https://github.com/${{ github.repository }}/releases/tag/${TAG}) |"
+          # 标记行放在索引表末尾：新行插在标记【之前】，保持表格行连续
+          # （HTML 注释夹在表头与数据行之间会把表格截断）
           awk -v row="$ROW" '
-            { print }
             /<!-- baseline-rows -->/ { print row }
+            { print }
           ' README.md > README.md.new
           grep -qF "$TAG" README.md.new || { echo "::error::README 缺少 <!-- baseline-rows --> 标记或写入失败"; exit 1; }
           mv README.md.new README.md
