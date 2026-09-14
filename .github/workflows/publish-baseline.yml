@@ -1,0 +1,269 @@
+name: Publish Baseline
+
+# 发布官方基线（题库快照 + config 存档 + digest 级 rawData，成对发布于本仓库 Release）。
+#
+# 维护者流程：
+#   1. 用 tv collect 在官方端点采集，得到 <model>.rawdata.jsonl.gz（raw_level 必须是 digest）
+#   2. 在本仓库网页 Releases → Draft a new release：
+#        tag 填 baseline-<model>-suitev<N>，标题随意，
+#        把三个文件【逐个、不打包】拖进去：
+#          - 采集配置 yaml（建议命名 config*.yaml）
+#          - 题库快照 yaml（config 里 suite.path 指向的那份）
+#          - rawData（文件名必须匹配 *.rawdata.jsonl.gz）
+#      保存为 draft（不要点 Publish）
+#   3. Actions → Publish Baseline → Run workflow，输入 draft 的 tag
+#   4. 本 workflow 自动：
+#        - 校验 draft 存在且未发布、rawData 是 digest 级
+#        - 校验题库 suite_version 与 rawData manifest 的 collection_plan 一致
+#        - 把 config 的 suite.path 改写为 release 内的同级文件名，并计算题库
+#          sha256 填入 suite.sha256（下载方解压即用、且被 sha256 钉住）
+#        - 生成 SHA256SUMS，回传 config 与校验和到该 release
+#        - 正式发布 release，并在 README 基线索引表加一行
+#      任一校验失败：release 保持 draft，不会被发布。
+#
+# 注意：已发布（非 draft）的 release 会被拒绝重复处理——基线一经发布不可变。
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'draft release 的 tag（baseline-<model>-suitevN）'
+        required: true
+        type: string
+      model:
+        description: '模型名（留空则取 rawData manifest 的 endpoint.model）'
+        required: false
+        type: string
+      notes:
+        description: '补充说明（采集窗口、特殊背景等，写入索引与 release 正文，可留空）'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  publish:
+    name: Validate and publish baseline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch draft release assets
+        id: draft
+        run: |
+          set -euo pipefail
+          TAG='${{ inputs.tag }}'
+          is_draft=$(gh release view "$TAG" --json isDraft --jq '.isDraft')
+          if [ "$is_draft" != "true" ]; then
+            echo "::error::release $TAG 已发布。基线不可变，不接受重复发布；如需更正请用新 tag 重新走 draft 流程"
+            exit 1
+          fi
+          mkdir -p _assets
+          gh release download "$TAG" --dir _assets
+          echo "assets:"; ls -la _assets
+          gh release view "$TAG" --json body --jq '.body // ""' > _orig_body.md || true
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Classify assets (config / suite / rawData)
+        id: files
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob, os, sys, yaml
+
+          assets = sorted(glob.glob('_assets/*'))
+          raws = [a for a in assets if a.endswith('.rawdata.jsonl.gz')]
+          yamls = [a for a in assets if a.endswith(('.yaml', '.yml'))]
+          if len(raws) != 1:
+              sys.exit(f'::error::需要恰好 1 个 *.rawdata.jsonl.gz，实际 {len(raws)} 个: {raws}')
+          cfg = suite = None
+          for y in yamls:
+              try:
+                  data = yaml.safe_load(open(y, encoding='utf-8')) or {}
+              except Exception as e:
+                  sys.exit(f'::error::{y} 不是合法 YAML: {e}')
+              if not isinstance(data, dict):
+                  continue
+              if 'suite_version' in data:
+                  if suite: sys.exit(f'::error::发现多个题库 yaml: {suite} 和 {y}')
+                  suite = y
+              elif 'suite' in data and 'probes' in data:
+                  if cfg: sys.exit(f'::error::发现多个 config yaml: {cfg} 和 {y}')
+                  cfg = y
+          if not suite:
+              sys.exit('::error::未找到题库 yaml（需含顶层 suite_version 字段）')
+          if not cfg:
+              sys.exit('::error::未找到 config yaml（需含 suite 与 probes 段）')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as f:
+              f.write(f'raw={raws[0]}\nsuite={suite}\ncfg={cfg}\n')
+          print(f'raw={raws[0]}  suite={suite}  cfg={cfg}')
+          PY
+
+      - name: Validate rawData manifest and suite consistency
+        id: meta
+        run: |
+          set -euo pipefail
+          manifest=$(zcat "${{ steps.files.outputs.raw }}" | head -1)
+          echo "$manifest" | jq -e '
+            .kind == "manifest" and
+            .raw_level == "digest" and
+            .format_version != null and
+            .collection_plan.suite_version != null
+          ' >/dev/null || {
+            echo "::error::rawData 校验失败：需要 kind=manifest、raw_level=digest、format_version 与 collection_plan.suite_version 齐全（full 级含原始输出文本，禁止发布）"
+            echo "$manifest" | jq '{kind, raw_level, format_version}' || true
+            exit 1
+          }
+          {
+            echo "tool_version=$(echo "$manifest" | jq -r '.tool_version')"
+            echo "format_version=$(echo "$manifest" | jq -r '.format_version')"
+            echo "suite_version=$(echo "$manifest" | jq -r '.collection_plan.suite_version')"
+            echo "manifest_model=$(echo "$manifest" | jq -r '.endpoint.model // ""')"
+            echo "plan_digest=$(echo "$manifest" | jq -r '.plan_digest')"
+          } >> "$GITHUB_OUTPUT"
+
+          # 题库一致性：上传的题库快照必须就是采集这份 rawData 用的题库
+          file_suite_version=$(grep -m1 -E '^suite_version:' "${{ steps.files.outputs.suite }}" | awk '{print $2}' | tr -d '"'"'"'\r')
+          manifest_suite_version=$(echo "$manifest" | jq -r '.collection_plan.suite_version')
+          if [ "$file_suite_version" != "$manifest_suite_version" ]; then
+            echo "::error::题库不一致：上传题库 suite_version=$file_suite_version，rawData manifest 记录的是 $manifest_suite_version"
+            exit 1
+          fi
+          echo "suite_version 一致: $file_suite_version"
+
+      - name: Rewrite config (suite.path -> release sibling, fill suite.sha256)
+        id: cfg
+        run: |
+          set -euo pipefail
+          SUITE='${{ steps.files.outputs.suite }}' CFG='${{ steps.files.outputs.cfg }}' python3 - <<'PY'
+          import hashlib, os, re, sys, yaml
+
+          cfg_path, suite_path = os.environ['CFG'], os.environ['SUITE']
+          suite_name = os.path.basename(suite_path)
+          suite_sha = hashlib.sha256(open(suite_path, 'rb').read()).hexdigest()
+
+          text = open(cfg_path, encoding='utf-8').read()
+          lines = text.split('\n')
+          start = next((i for i, l in enumerate(lines)
+                        if re.match(r'^suite:\s*(#.*)?$', l)), None)
+          if start is None:
+              sys.exit(f'::error::{cfg_path} 缺少顶层 suite: 段')
+          end = start + 1
+          while end < len(lines) and (lines[end].strip() == '' or lines[end][0] in ' \t'):
+              end += 1
+
+          path_idx = sha_idx = None
+          orig_path = None
+          for i in range(start + 1, end):
+              m = re.match(r'^(\s+)path:\s*(\S+)', lines[i])
+              if m and path_idx is None:
+                  path_idx, orig_path = i, m.group(2)
+              if re.match(r'^\s*#?\s*sha256:', lines[i]) and sha_idx is None:
+                  sha_idx = i
+          if path_idx is None:
+              sys.exit('::error::config 的 suite: 段缺少 path 字段')
+          indent = re.match(r'^(\s+)', lines[path_idx]).group(1)
+
+          if os.path.basename(orig_path) != suite_name:
+              print(f'::warning::config 里 suite.path 指向 {orig_path}，'
+                    f'但上传的题库文件名是 {suite_name}（已按同级目录改写；'
+                    f'suite_version 与 rawData manifest 的一致性已另行校验通过）')
+
+          lines[path_idx] = (f'{indent}path: ./{suite_name}'
+                             f'   # 原采集路径: {orig_path}；发布时改写为 release 内同级文件')
+          sha_line = f'{indent}sha256: {suite_sha}   # 发布 workflow 计算填入，钉住题库快照'
+          if sha_idx is not None:
+              lines[sha_idx] = sha_line
+          else:
+              lines.insert(path_idx + 1, sha_line)
+
+          new_text = '\n'.join(lines)
+          data = yaml.safe_load(new_text)  # 改写后必须仍是合法 config
+          assert data['suite']['path'] == f'./{suite_name}', data['suite']['path']
+          assert data['suite']['sha256'] == suite_sha
+          open(cfg_path, 'w', encoding='utf-8', newline='\n').write(new_text)
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as f:
+              f.write(f'suite_sha={suite_sha}\norig_path={orig_path}\n')
+          print(f'suite.path: {orig_path} -> ./{suite_name}')
+          print(f'suite.sha256: {suite_sha}')
+          PY
+
+      - name: Generate SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd _assets
+          rm -f SHA256SUMS
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Compose release body, upload artifacts, publish
+        run: |
+          set -euo pipefail
+          TAG='${{ steps.draft.outputs.tag }}'
+          MODEL='${{ inputs.model }}'
+          [ -n "$MODEL" ] || MODEL='${{ steps.meta.outputs.manifest_model }}'
+          SUITE_NAME=$(basename '${{ steps.files.outputs.suite }}')
+          RAW_NAME=$(basename '${{ steps.files.outputs.raw }}')
+          CFG_NAME=$(basename '${{ steps.files.outputs.cfg }}')
+          SUITE_SHA='${{ steps.cfg.outputs.suite_sha }}'
+
+          {
+            echo "官方基线数据：**${MODEL}**"
+            echo
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 模型 | ${MODEL} |"
+            echo "| 题库 | ${SUITE_NAME}（suite_version ${{ steps.meta.outputs.suite_version }}） |"
+            echo "| 题库 sha256（suite.sha256 pin 用） | \`${SUITE_SHA}\` |"
+            echo "| rawData | ${RAW_NAME}（digest 级，format_version ${{ steps.meta.outputs.format_version }}） |"
+            echo "| 采集 tool 版本 | ${{ steps.meta.outputs.tool_version }} |"
+            echo "| plan_digest | \`${{ steps.meta.outputs.plan_digest }}\` |"
+            echo "| 采集配置存档 | ${CFG_NAME}（suite.path 已改写为同级文件，suite.sha256 已填入） |"
+            echo
+            echo "使用方式（三个文件下载到同一目录，config 解压即用）："
+            echo '```bash'
+            echo "curl -LO .../${TAG}/${SUITE_NAME}"
+            echo "curl -LO .../${TAG}/${RAW_NAME}"
+            echo "curl -LO .../${TAG}/${CFG_NAME}"
+            echo "tv run -c ${CFG_NAME} ${RAW_NAME}   # 或换成你自己端点的配置后与之比较"
+            echo '```'
+            echo
+            echo "探针参数须与采集计划一致才能通过 digest 闸门，以 rawData manifest 的"
+            echo "collection_plan 为准。索引与版本兼容说明见仓库 README。"
+            NOTES='${{ inputs.notes }}'
+            [ -n "$NOTES" ] && { echo; echo "> ${NOTES}"; }
+            if [ -s _orig_body.md ]; then
+              echo; echo '---'; echo; echo 'draft 时的原始说明：'; echo
+              cat _orig_body.md
+            fi
+          } > _body.md
+
+          gh release upload "$TAG" \
+            "_assets/${CFG_NAME}" "_assets/SHA256SUMS" --clobber
+          gh release edit "$TAG" --body-file _body.md --draft=false
+          echo "published: $TAG"
+          echo "model=$MODEL" >> "$GITHUB_ENV"
+
+      - name: Add row to README baseline index
+        run: |
+          set -euo pipefail
+          TAG='${{ steps.draft.outputs.tag }}'
+          MODEL="${model:-${{ inputs.model }}}"
+          NOTES='${{ inputs.notes }}'
+          ROW="| ${MODEL} | ${{ steps.meta.outputs.suite_version }} | ${{ steps.meta.outputs.tool_version }} | ${NOTES:-—} | [\`${TAG}\`](https://github.com/${{ github.repository }}/releases/tag/${TAG}) |"
+          awk -v row="$ROW" '
+            { print }
+            /<!-- baseline-rows -->/ { print row }
+          ' README.md > README.md.new
+          grep -qF "$TAG" README.md.new || { echo "::error::README 缺少 <!-- baseline-rows --> 标记或写入失败"; exit 1; }
+          mv README.md.new README.md
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git commit -m "baseline: index ${TAG} (${MODEL})"
+          git push
