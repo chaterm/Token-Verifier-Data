@@ -107,7 +107,10 @@ jobs:
         id: meta
         run: |
           set -euo pipefail
-          manifest=$(zcat "${{ steps.files.outputs.raw }}" | head -1)
+          # `|| true`：head 取完第 1 行即关闭管道，zcat 收到 SIGPIPE 退出 141，
+          # pipefail 会把整条管道判为失败——这是预期行为，不是数据错误
+          manifest=$(zcat "${{ steps.files.outputs.raw }}" | head -1 || true)
+          [ -n "$manifest" ] || { echo "::error::rawData 无法解压或为空"; exit 1; }
           echo "$manifest" | jq -e '
             .kind == "manifest" and
             .raw_level == "digest" and
