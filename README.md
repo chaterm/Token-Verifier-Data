@@ -16,6 +16,7 @@
 | 模型 | suite | tool 版本 | 采集窗口/备注 | Release |
 |---|---|---|---|---|
 | DeepSeek-V4.1-Flash | v4 | 0.1.0-rc.1 | — | [`baseline-deepseek-v4.1-flash-suitev4`](https://github.com/chaterm/Token-Verifier-Data/releases/tag/baseline-deepseek-v4.1-flash-suitev4) |
+| DeepSeek-V4-Pro-0813 | v4 | 0.1.0-rc.1 | — | [`baseline-deepseek-v4-pro-0813-suitev4`](https://github.com/chaterm/Token-Verifier-Data/releases/tag/baseline-deepseek-v4-pro-0813-suitev4) |
 <!-- baseline-rows -->
 
 rawData 的可比性由 format_version / probe_version / suite_version 等共同决定，任一不一致 digest 闸门会拒绝比较，详见主仓库 [docs/BASELINES.md](https://github.com/chaterm/Token-Verifier/blob/main/docs/BASELINES.md) 与 [docs/SPEC-RAWDATA.md](https://github.com/chaterm/Token-Verifier/blob/main/docs/SPEC-RAWDATA.md)。
