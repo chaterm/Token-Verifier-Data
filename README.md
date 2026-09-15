@@ -21,6 +21,7 @@
 | GLM-5.3 | v4 | 0.1.0-rc.1 | — | [`baseline-glm-5.3-suitev4`](https://github.com/chaterm/Token-Verifier-Data/releases/tag/baseline-glm-5.3-suitev4) |
 | GPT-6-Astra | v4 | 0.1.0-rc.2 | — | [`baseline-gpt-6-astra-suitev4`](https://github.com/chaterm/Token-Verifier-Data/releases/tag/baseline-gpt-6-astra-suitev4) |
 | GPT-5.6-Sol | v4 | 0.1.0-rc.2 | — | [`baseline-gpt-5.6-sol-suitev4`](https://github.com/chaterm/Token-Verifier-Data/releases/tag/baseline-gpt-5.6-sol-suitev4) |
+| GPT-5.6-Luna | v4 | 0.1.0-rc.2 | — | [`baseline-gpt-5.6-luna-suitev4`](https://github.com/chaterm/Token-Verifier-Data/releases/tag/baseline-gpt-5.6-luna-suitev4) |
 <!-- baseline-rows -->
 
 rawData 的可比性由 format_version / probe_version / suite_version 等共同决定，任一不一致 digest 闸门会拒绝比较，详见主仓库 [docs/BASELINES.md](https://github.com/chaterm/Token-Verifier/blob/main/docs/BASELINES.md) 与 [docs/SPEC-RAWDATA.md](https://github.com/chaterm/Token-Verifier/blob/main/docs/SPEC-RAWDATA.md)。
