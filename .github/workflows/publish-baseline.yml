@@ -138,7 +138,7 @@ jobs:
           fi
           echo "suite_version 一致: $file_suite_version"
 
-      - name: Rewrite config (suite.path -> release sibling, fill suite.sha256)
+      - name: Rewrite config (suite.path -> sibling, fill sha256, redact base_url)
         id: cfg
         run: |
           set -euo pipefail
@@ -150,14 +150,48 @@ jobs:
           suite_sha = hashlib.sha256(open(suite_path, 'rb').read()).hexdigest()
 
           text = open(cfg_path, encoding='utf-8').read()
+
+          # ── 发布前密钥扫描：config 只允许 api_key_env（环境变量名），
+          #    出现明文密钥样式直接拒绝发布（只报行号，不回显内容）──
+          hits = [i for i, l in enumerate(text.split('\n'), 1)
+                  if re.search(r'sk-[A-Za-z0-9_\-]{16,}', l)
+                  or re.search(r'^\s*(api_key|key|token|secret)\s*:\s*\S', l)]
+          if hits:
+              sys.exit(f'::error::{cfg_path} 疑似含明文密钥（行 {hits}），拒绝发布；'
+                       f'密钥请只以 api_key_env 环境变量名出现')
+
           lines = text.split('\n')
-          start = next((i for i, l in enumerate(lines)
-                        if re.match(r'^suite:\s*(#.*)?$', l)), None)
+
+          def section_bounds(name):
+              start = next((i for i, l in enumerate(lines)
+                            if re.match(rf'^{name}:\s*(#.*)?$', l)), None)
+              if start is None:
+                  return None, None
+              end = start + 1
+              while end < len(lines) and (lines[end].strip() == '' or lines[end][0] in ' \t'):
+                  end += 1
+              return start, end
+
+          # ── 脱敏 target.base_url：存档不暴露真实端点主机。
+          #    base_url 不进 digest、不参与比较，替换不影响可比性；
+          #    原始主机在 rawData manifest 中也只有指纹 ──
+          redacted = False
+          tstart, tend = section_bounds('target')
+          if tstart is not None:
+              for i in range(tstart + 1, tend):
+                  m = re.match(r'^(\s+)base_url:\s*(\S+)', lines[i])
+                  if m:
+                      lines[i] = (f'{m.group(1)}base_url: https://api.example.com'
+                                  f'   # 发布时已脱敏原端点；比较前换成你自己的端点')
+                      redacted = True
+                      break
+          if not redacted:
+              print(f'::warning::{cfg_path} 未找到 target.base_url，跳过脱敏')
+
+          # ── suite.path 改写为 release 同级文件名 + 填入 sha256 ──
+          start, end = section_bounds('suite')
           if start is None:
               sys.exit(f'::error::{cfg_path} 缺少顶层 suite: 段')
-          end = start + 1
-          while end < len(lines) and (lines[end].strip() == '' or lines[end][0] in ' \t'):
-              end += 1
 
           path_idx = sha_idx = None
           orig_path = None
@@ -188,12 +222,15 @@ jobs:
           data = yaml.safe_load(new_text)  # 改写后必须仍是合法 config
           assert data['suite']['path'] == f'./{suite_name}', data['suite']['path']
           assert data['suite']['sha256'] == suite_sha
+          if redacted:
+              assert data['target']['base_url'] == 'https://api.example.com'
           open(cfg_path, 'w', encoding='utf-8', newline='\n').write(new_text)
 
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as f:
               f.write(f'suite_sha={suite_sha}\norig_path={orig_path}\n')
           print(f'suite.path: {orig_path} -> ./{suite_name}')
           print(f'suite.sha256: {suite_sha}')
+          print(f'target.base_url redacted: {redacted}')
           PY
 
       - name: Generate SHA256SUMS

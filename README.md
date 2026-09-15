@@ -8,7 +8,7 @@
 |---|---|
 | 题库快照 yaml | 采集该 rawData 时用的题库（`suite_version` 与 manifest 强一致校验） |
 | `*.rawdata.jsonl.gz` | digest 级 rawData（full 级含模型输出文本，门禁直接拒绝） |
-| config yaml | 采集配置存档（无密钥）。发布时 workflow 自动把 `suite.path` 改写为同级文件名，并计算题库 `sha256` 填入 `suite.sha256` —— 下载到同一目录即可直接 `tv run` |
+| config yaml | 采集配置存档（无密钥）。发布时 workflow 自动：把 `suite.path` 改写为同级文件名并填入 `suite.sha256`；把 `target.base_url` 脱敏为 `https://api.example.com`（base_url 不进 digest，不影响可比性）；扫描到明文密钥样式则拒绝发布 —— 下载到同一目录、换成自己的端点即可 `tv run` |
 | `SHA256SUMS` | 上述全部附件的校验和，由 workflow 生成 |
 
 ## 基线索引
